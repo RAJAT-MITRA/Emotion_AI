@@ -1,256 +1,346 @@
 import React, { useState, useRef, useEffect } from 'react';
 import Webcam from 'react-webcam';
-import { Camera, UploadCloud, Activity, AlertCircle, Loader2, Sparkles, Image as ImageIcon } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
-import './App.css'; 
+import './App.css';
 
+/* ── Emotion config ─────────────────────────── */
+const EMOTION_META = {
+  joy: { emoji: '😄', label: 'Joy', cls: 'joy', tip: 'You look genuinely happy right now!' },
+  sadness: { emoji: '😢', label: 'Sadness', cls: 'sadness', tip: 'It\'s okay — emotions are data, not destiny.' },
+  anger: { emoji: '😠', label: 'Anger', cls: 'anger', tip: 'High intensity detected. Take a breath.' },
+  neutral: { emoji: '😶', label: 'Neutral', cls: 'neutral', tip: 'Calm and composed — a great baseline.' },
+};
+
+function getEmotionMeta(label = '') {
+  return EMOTION_META[label.toLowerCase()] ?? EMOTION_META.neutral;
+}
+
+/* ── Confidence Ring ────────────────────────── */
+function ConfidenceRing({ score, cls }) {
+  const r = 30;
+  const c = 2 * Math.PI * r;
+  const offset = c - (score / 100) * c;
+  return (
+    <div className="confidence-ring-wrap">
+      <svg viewBox="0 0 70 70" width="70" height="70">
+        <circle className="ring-track" cx="35" cy="35" r={r} />
+        <circle
+          className={`ring-fill ${cls}`}
+          cx="35" cy="35" r={r}
+          strokeDasharray={c}
+          strokeDashoffset={offset}
+        />
+      </svg>
+      <div className="ring-label">{Math.round(score)}%</div>
+    </div>
+  );
+}
+
+/* ── Main App ──────────────────────────────── */
 export default function App() {
-  const [inputMode, setInputMode] = useState('upload'); 
+  const [inputMode, setInputMode] = useState('upload');
   const [filePreview, setFilePreview] = useState(null);
   const [status, setStatus] = useState('idle');
-  const [data, setData] = useState(null); 
+  const [data, setData] = useState(null);
   const [isLive, setIsLive] = useState(false);
-  
+
   const webcamRef = useRef(null);
   const fileInputRef = useRef(null);
 
-  // --- Real-time Webcam Loop ---
+  /* ── Live webcam loop ── */
   useEffect(() => {
-    let interval;
+    let iv;
     if (isLive && inputMode === 'webcam') {
       setStatus('processing');
-      interval = setInterval(() => {
-        captureAndAnalyzeFrame();
-      }, 800); // Analyzes a frame every 800ms
+      iv = setInterval(captureAndAnalyze, 800);
     } else if (inputMode === 'webcam' && !isLive) {
       setStatus('idle');
       setData(null);
     }
-    return () => clearInterval(interval);
+    return () => clearInterval(iv);
   }, [isLive, inputMode]);
 
-  const captureAndAnalyzeFrame = async () => {
-    if (webcamRef.current) {
-      const imageSrc = webcamRef.current.getScreenshot();
-      if (!imageSrc) return;
+  async function captureAndAnalyze() {
+    if (!webcamRef.current) return;
+    const imageSrc = webcamRef.current.getScreenshot();
+    if (!imageSrc) return;
+    try {
+      const res = await fetch('http://127.0.0.1:8000/analyze-frame', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image: imageSrc }),
+      });
+      const result = await res.json();
+      if (!result.error) { setData(result); setStatus('completed'); }
+    } catch (e) { console.error(e); }
+  }
 
-      try {
-        const response = await fetch("http://127.0.0.1:8000/analyze-frame", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ image: imageSrc }),
-        });
-        const result = await response.json();
-        
-        if (!result.error) {
-            setData(result);
-            setStatus('completed');
-        }
-      } catch (err) {
-        console.error("Webcam stream error:", err);
-      }
-    }
-  };
-
-  // --- File Upload Logic ---
-  const handleFileUpload = async (e) => {
+  async function handleFileUpload(e) {
     const file = e.target.files[0];
     if (!file) return;
-
     setFilePreview(URL.createObjectURL(file));
     setStatus('processing');
     setData(null);
-
-    const formData = new FormData();
-    formData.append("file", file);
-
+    const form = new FormData();
+    form.append('file', file);
     try {
-      const response = await fetch("http://127.0.0.1:8000/analyze", {
-        method: "POST",
-        body: formData,
-      });
-      const result = await response.json();
-      
+      const res = await fetch('http://127.0.0.1:8000/analyze', { method: 'POST', body: form });
+      const result = await res.json();
       if (result.error) throw new Error(result.error);
-      
       setData(result);
       setStatus('completed');
-    } catch (err) {
+    } catch {
       setStatus('error');
-      console.error("Upload error:", err);
     }
-  };
+  }
 
-  // --- Draw the Face Box Dynamically ---
-  const renderBoundingBox = () => {
-    if (!data || !data.region || data.region.w === 0) return null;
-    
-    // Convert pixels to percentages so the box scales perfectly with the container
+  function resetUpload() {
+    setFilePreview(null);
+    setData(null);
+    setStatus('idle');
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  }
+
+  function switchMode(mode) {
+    setInputMode(mode);
+    setIsLive(false);
+    setData(null);
+    setStatus('idle');
+    setFilePreview(null);
+  }
+
+  /* ── Bounding box ── */
+  function BoundingBox() {
+    if (!data?.region || data.region.w === 0) return null;
     const { x, y, w, h } = data.region;
-    const { image_width, image_height } = data;
-
-    const left = (x / image_width) * 100;
-    const top = (y / image_height) * 100;
-    const width = (w / image_width) * 100;
-    const height = (h / image_height) * 100;
-
+    const { image_width: iw, image_height: ih } = data;
+    const meta = getEmotionMeta(data.emotions[0]?.label);
     return (
-      <div 
-        style={{
-          position: 'absolute',
-          left: `${left}%`, top: `${top}%`, width: `${width}%`, height: `${height}%`,
-          border: '3px solid #22d3ee',
-          borderRadius: '8px',
-          boxShadow: '0 0 15px rgba(34, 211, 238, 0.5), inset 0 0 15px rgba(34, 211, 238, 0.3)',
-          transition: 'all 0.2s ease-out',
-          zIndex: 20,
-          pointerEvents: 'none'
-        }}
-      >
-        <div style={{ position: 'absolute', top: '-25px', left: '-3px', background: '#22d3ee', color: '#000', padding: '2px 8px', fontSize: '12px', fontWeight: 'bold', borderRadius: '4px', whiteSpace: 'nowrap' }}>
-          {data.emotions[0].label} {data.emotions[0].score.toFixed(0)}%
+      <div className="face-box" style={{
+        position: 'absolute',
+        left: `${(x / iw) * 100}%`,
+        top: `${(y / ih) * 100}%`,
+        width: `${(w / iw) * 100}%`,
+        height: `${(h / ih) * 100}%`,
+      }}>
+        <div className="face-label">
+          {meta.emoji} {data.emotions[0].label} · {data.emotions[0].score.toFixed(0)}%
         </div>
       </div>
     );
-  };
+  }
 
-  const getEmotionClass = (label) => {
-    switch(label.toLowerCase()) {
-      case 'joy': return 'bar-joy';
-      case 'sadness': return 'bar-sadness';
-      case 'anger': return 'bar-anger';
-      default: return 'bar-neutral';
-    }
-  };
+  const statusText = { idle: 'Waiting', processing: 'Analyzing…', completed: 'Done', error: 'Error' };
+  const dominant = data?.emotions?.[0];
+  const domMeta = dominant ? getEmotionMeta(dominant.label) : null;
 
   return (
-    <div className="dashboard-container">
-      <div className="ambient-background">
-        <div className="orb orb-1" />
-        <div className="orb orb-2" />
-      </div>
+    <div className="shell">
+      {/* ── Top Bar ── */}
+      <header className="topbar">
+        <div className="topbar-brand">
+          <div className="brand-icon">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 2a10 10 0 1 0 10 10" />
+              <path d="M12 8v4l3 3" />
+            </svg>
+          </div>
+          <span className="brand-name">Emotion<span>AI</span></span>
+        </div>
+        <div className="topbar-badge">
+          <span className="live-dot" />
+          DeepFace · Live
+        </div>
+      </header>
 
-      <div className="dashboard-content">
-        <header className="dashboard-header">
-          <div className="header-title-wrapper">
-            <div className="logo-icon"><Activity className="icon-cyan" size={24} /></div>
-            <div>
-              <h1 className="main-title">Emotion <span className="text-gradient"> AI</span></h1>
-              <p className="subtitle">Real-time facial expression analysis powered by DeepFace CNNs.</p>
+      {/* ── Sidebar ── */}
+      <aside className="sidebar">
+        <div>
+          <p className="sidebar-label">Input Mode</p>
+
+          <div className={`mode-card mode-card-upload ${inputMode === 'upload' ? 'active' : ''}`}
+            onClick={() => switchMode('upload')}>
+            <div className="mode-card-icon">📤</div>
+            <div className="mode-card-text">
+              <strong>Upload Image</strong>
+              <span>JPG, PNG, WebP</span>
             </div>
           </div>
-        </header>
 
-        <main className="dashboard-grid">
-          {/* LEFT COLUMN: Input Section */}
-          <section className="input-section">
-            <div className="mode-toggle">
-              <button onClick={() => { setInputMode('upload'); setIsLive(false); setData(null); setStatus('idle'); }} className={`toggle-btn ${inputMode === 'upload' ? 'active' : ''}`}>
-                <UploadCloud size={16} /> Upload
-              </button>
-              <button onClick={() => { setInputMode('webcam'); setData(null); setStatus('idle'); }} className={`toggle-btn ${inputMode === 'webcam' ? 'active' : ''}`}>
-                <Camera size={16} /> Live Webcam
-              </button>
+          <div className={`mode-card mode-card-webcam ${inputMode === 'webcam' ? 'active' : ''}`}
+            onClick={() => switchMode('webcam')}>
+            <div className="mode-card-icon">📷</div>
+            <div className="mode-card-text">
+              <strong>Live Webcam</strong>
+              <span>Real-time scan</span>
             </div>
+          </div>
+        </div>
 
-            <div className="media-container glass-card">
+        <div className="emotion-legend">
+          <p className="sidebar-label">Emotion Palette</p>
+          {Object.values(EMOTION_META).map(m => (
+            <div key={m.label} className="legend-item">
+              <div className="legend-dot" style={{ background: `var(--${m.cls})` }} />
+              <span>{m.emoji} {m.label}</span>
+            </div>
+          ))}
+        </div>
+      </aside>
+
+      {/* ── Main ── */}
+      <div className="main">
+
+        {/* Canvas area */}
+        <div className="canvas-area">
+          <div className="canvas-header">
+            <div>
+              <h1 className="canvas-title">
+                {inputMode === 'upload' ? <>Drop a <em>face photo</em>.</> : <>Go <em>live</em>, smile big.</>}
+              </h1>
+              <p className="canvas-subtitle">
+                {inputMode === 'upload'
+                  ? 'Upload any portrait and DeepFace will map every micro-expression in real time.'
+                  : 'Your webcam feed is analyzed frame-by-frame at ~800ms intervals.'}
+              </p>
+            </div>
+            <div className={`status-chip ${status}`}>
+              <span className="status-dot" />
+              {statusText[status]}
+            </div>
+          </div>
+
+          {/* Viewport */}
+          <div className="media-viewport">
+            <AnimatePresence mode="wait">
               {inputMode === 'upload' ? (
-                <div className="media-wrapper">
-                  {filePreview ? (
-                    <div className="preview-container">
-                      <img src={filePreview} alt="Preview" className="preview-image" />
-                      {renderBoundingBox()}
-                      <button onClick={() => { setFilePreview(null); setData(null); setStatus('idle'); }} className="reset-btn">
-                        <Activity size={20} />
-                      </button>
-                    </div>
-                  ) : (
-                    <div className="drop-zone" onClick={() => fileInputRef.current.click()}>
-                      <div className="drop-icon"><ImageIcon size={32} /></div>
-                      <h3>Click to Upload Image</h3>
-                      <p>Supports JPG, PNG up to 10MB.</p>
-                      <input type="file" ref={fileInputRef} onChange={handleFileUpload} accept="image/*" className="hidden-input" />
+                filePreview ? (
+                  <motion.div key="preview" className="preview-wrap"
+                    initial={{ opacity: 0, scale: 0.97 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    exit={{ opacity: 0, scale: 0.97 }}
+                    transition={{ duration: 0.25 }}
+                    style={{ position: 'absolute', inset: 0 }}
+                  >
+                    <img src={filePreview} alt="Preview" className="preview-image" />
+                    <BoundingBox />
+                    {status === 'processing' && (
+                      <div className="processing-overlay">
+                        <div className="spinner-ring" />
+                        <p>Running DeepFace analysis…</p>
+                      </div>
+                    )}
+                    <button className="preview-close" onClick={resetUpload} title="Remove">✕</button>
+                  </motion.div>
+                ) : (
+                  <motion.div key="dropzone" className="dropzone"
+                    initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+                    onClick={() => fileInputRef.current?.click()}
+                  >
+                    <div className="dropzone-emoji">🖼️</div>
+                    <h3>Drop your photo here</h3>
+                    <p>Portrait works best — make sure a face<br />is visible and well-lit.</p>
+                    <button className="upload-btn" onClick={e => { e.stopPropagation(); fileInputRef.current?.click(); }}>
+                      📤 Choose File
+                    </button>
+                    <input type="file" ref={fileInputRef} onChange={handleFileUpload}
+                      accept="image/*" className="hidden-input" />
+                  </motion.div>
+                )
+              ) : (
+                <motion.div key="webcam" className="webcam-viewport"
+                  initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+                >
+                  <Webcam audio={false} ref={webcamRef}
+                    screenshotFormat="image/jpeg"
+                    videoConstraints={{ facingMode: 'user' }}
+                    className="webcam-feed" />
+                  <BoundingBox />
+                  <div className="webcam-controls">
+                    <button className={`scan-btn ${isLive ? 'stop' : 'start'}`}
+                      onClick={() => setIsLive(v => !v)}>
+                      {isLive ? '⏹ Stop Scan' : '▶ Start Scan'}
+                    </button>
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+        </div>
+
+        {/* Analysis panel */}
+        <div className="analysis-panel">
+          <div className="panel-header">
+            <p className="panel-eyebrow">Neural Output</p>
+            <h2 className="panel-title">Emotion Analysis</h2>
+          </div>
+
+          <div className="panel-body">
+            <AnimatePresence mode="wait">
+              {!data ? (
+                <motion.div key="empty" className="empty-state"
+                  initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}>
+                  <div className="empty-emoji">🧠</div>
+                  <p className="empty-title">Nothing yet</p>
+                  <p className="empty-desc">Upload a portrait or start your webcam scan to see results.</p>
+                </motion.div>
+              ) : (
+                <motion.div key="results"
+                  initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }}
+                  transition={{ duration: 0.35 }}>
+
+                  {/* Dominant card */}
+                  {domMeta && (
+                    <div className={`dominant-card ${domMeta.cls}`}>
+                      <p className={`dominant-tag ${domMeta.cls}`}>Dominant Emotion</p>
+                      <div className="dominant-row">
+                        <div className="dominant-text">
+                          <span className="dominant-emoji">{domMeta.emoji}</span>
+                          <strong>{domMeta.label}</strong>
+                          <span>Detected with confidence</span>
+                        </div>
+                        <ConfidenceRing score={dominant.score} cls={domMeta.cls} />
+                      </div>
                     </div>
                   )}
-                </div>
-              ) : (
-                <div className="media-wrapper webcam-wrapper">
-                  <Webcam 
-                    audio={false} 
-                    ref={webcamRef} 
-                    screenshotFormat="image/jpeg" 
-                    videoConstraints={{ facingMode: "user" }}
-                    className="webcam-feed"
-                  />
-                  {renderBoundingBox()}
-                  
-                  <button 
-                    onClick={() => setIsLive(!isLive)}
-                    className={`live-toggle-btn ${isLive ? 'stop' : 'start'}`}
-                  >
-                    {isLive ? "Stop Scanning" : "Start Live Scan"}
-                  </button>
-                </div>
-              )}
-            </div>
-          </section>
 
-          {/* RIGHT COLUMN: Results Section */}
-          <section className="results-section glass-card">
-            <h2 className="results-title"><Activity size={20} className="icon-indigo" /> Analysis Results</h2>
-            <div className="results-content">
-              
-              {!data && status !== 'processing' && (
-                 <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="empty-state">
-                   <div className="empty-orb" />
-                   <p>Awaiting input to generate neural confidence scores.</p>
-                 </motion.div>
-              )}
-              
-              {status === 'processing' && !data && (
-                <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="loading-state">
-                  <Loader2 size={48} className="spin-animation icon-cyan" style={{ margin: '0 auto 1rem' }} />
-                  <p>Analyzing frame...</p>
+                  {/* Spectrum */}
+                  <div className="spectrum-section">
+                    <p className="spectrum-label">Full Spectrum</p>
+                    {data.emotions.map((emo, i) => {
+                      const m = getEmotionMeta(emo.label);
+                      return (
+                        <div key={i} className="bar-row">
+                          <div className="bar-label-group">
+                            <span className="bar-emoji">{m.emoji}</span>
+                            <span className="bar-name">{m.label}</span>
+                          </div>
+                          <div className="bar-track">
+                            <motion.div
+                              className={`bar-fill ${m.cls}`}
+                              initial={{ width: 0 }}
+                              animate={{ width: `${Math.max(emo.score, 0.5)}%` }}
+                              transition={{ duration: 0.55, ease: [0.34, 1.56, 0.64, 1], delay: i * 0.06 }}
+                            />
+                          </div>
+                          <span className="bar-pct">{emo.score.toFixed(1)}%</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {/* Tip */}
+                  {domMeta && (
+                    <div className="tip-card">
+                      <strong>💡 Insight</strong>
+                      {domMeta.tip}
+                    </div>
+                  )}
                 </motion.div>
               )}
-
-              {data && data.emotions && (
-                <motion.div initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} className="results-data">
-                  <div className="dominant-emotion">
-                    <div>
-                      <p className="label">Dominant Trait</p>
-                      <h3>{data.emotions[0].label}</h3>
-                    </div>
-                    <div className="text-right">
-                      <p className="label">Confidence</p>
-                      <span className="score">{data.emotions[0].score.toFixed(1)}%</span>
-                    </div>
-                  </div>
-                  <div className="progress-list">
-                    <h4 className="label">Full Spectrum</h4>
-                    {data.emotions.map((emo, idx) => (
-                      <div key={idx} className="progress-item">
-                        <div className="progress-info">
-                          <span>{emo.label}</span>
-                          <span className="progress-score">{emo.score.toFixed(1)}%</span>
-                        </div>
-                        <div className="progress-track">
-                          <motion.div 
-                            initial={{ width: 0 }}
-                            animate={{ width: `${emo.score}%` }}
-                            transition={{ duration: 0.5, ease: "easeOut" }}
-                            className={`progress-fill ${getEmotionClass(emo.label)}`}
-                          />
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </motion.div>
-              )}
-
-            </div>
-          </section>
-        </main>
+            </AnimatePresence>
+          </div>
+        </div>
       </div>
     </div>
   );
