@@ -469,7 +469,8 @@ def analyze_emotion(image):
             'image_height': img_array.shape[0]
         }
     except Exception as e:
-        st.error(f"Error analyzing emotion: {str(e)}")
+        print(f"Error analyzing emotion: {str(e)}")  # Log to terminal
+        st.error(f"❌ Analysis error: {str(e)}")
         return None
 
 def draw_bounding_box(image, region):
@@ -540,8 +541,8 @@ def render_emotion_results(data):
         </div>
         """, unsafe_allow_html=True)
         
-        # Progress bar
-        st.progress(max(emotion['score'] / 100, 0.005))
+        # Progress bar - convert to Python float
+        st.progress(float(max(emotion['score'] / 100, 0.005)))
     
     # Tip card
     st.markdown(f"""
@@ -558,6 +559,8 @@ if 'status' not in st.session_state:
     st.session_state.status = 'idle'
 if 'webcam_running' not in st.session_state:
     st.session_state.webcam_running = False
+if 'last_capture_time' not in st.session_state:
+    st.session_state.last_capture_time = time.time()
 
 # Header
 st.markdown("""
@@ -581,7 +584,7 @@ with st.sidebar:
     st.markdown('<div class="sidebar-label">INPUT MODE</div>', unsafe_allow_html=True)
     
     input_mode = st.radio(
-        "",
+        "Select Input Mode",
         ["📤 Upload Image", "📷 Live Webcam"],
         label_visibility="collapsed"
     )
@@ -627,30 +630,39 @@ with col1:
         )
         
         if uploaded_file is not None:
-            # Process image
-            st.session_state.status = 'processing'
+            # Display uploaded image first
             image = Image.open(uploaded_file)
             
+            # Process image
+            st.session_state.status = 'processing'
+            
             # Analyze emotion
-            with st.spinner("Running DeepFace analysis..."):
+            with st.spinner("🧠 Running DeepFace analysis..."):
                 data = analyze_emotion(image)
-                if data:
-                    st.session_state.analysis_data = data
-                    st.session_state.status = 'completed'
-                    
-                    # Draw bounding box
-                    img_with_box = draw_bounding_box(np.array(image), data['region'])
-                    
-                    # Display image with overlay
-                    st.image(img_with_box, use_container_width=True)
-                    
-                    # Show emotion label on image
-                    if data['region']['w'] > 0:
-                        dominant = data['emotions'][0]
-                        meta = get_emotion_meta(dominant['label'])
-                        st.caption(f"{meta['emoji']} {meta['label']} · {dominant['score']:.0f}%")
+                
+            if data:
+                st.session_state.analysis_data = data
+                st.session_state.status = 'completed'
+                
+                # Draw bounding box
+                img_with_box = draw_bounding_box(np.array(image), data['region'])
+                
+                # Display image with overlay
+                st.image(img_with_box, use_container_width=True)
+                
+                # Show emotion label on image
+                if data['region']['w'] > 0:
+                    dominant = data['emotions'][0]
+                    meta = get_emotion_meta(dominant['label'])
+                    st.success(f"✓ Detected: {meta['emoji']} {meta['label']} · {dominant['score']:.0f}%")
                 else:
-                    st.error("Could not analyze the image. Please try another image with a clear face.")
+                    st.info("ℹ️ Analyzing face...")
+            else:
+                # Show original image even if analysis fails
+                st.image(image, use_container_width=True)
+                st.error("⚠ Could not detect a face. Please try another image with a clear, well-lit face.")
+                st.session_state.status = 'idle'
+                st.session_state.analysis_data = None
         else:
             # Empty state
             st.markdown("""
@@ -686,43 +698,64 @@ with col1:
         col_btn1, col_btn2 = st.columns(2)
         
         with col_btn1:
-            if st.button("▶ Start Scan" if not st.session_state.webcam_running else "⏹ Stop Scan"):
+            if st.button("▶ Start Scan" if not st.session_state.webcam_running else "⏹ Stop Scan", key="webcam_toggle"):
                 st.session_state.webcam_running = not st.session_state.webcam_running
+                if not st.session_state.webcam_running:
+                    st.session_state.analysis_data = None
+                    st.session_state.status = 'idle'
+                st.rerun()
         
         if st.session_state.webcam_running:
-            st.session_state.status = 'processing'
+            st.markdown("---")
+            st.markdown("### 📸 Live Camera Feed")
             
-            # Webcam capture
-            picture = st.camera_input("", label_visibility="collapsed")
+            # Camera input - always visible when scanning
+            picture = st.camera_input(
+                "Take a photo to analyze emotion", 
+                key="webcam_live"
+            )
             
             if picture is not None:
                 # Process webcam frame
-                image = Image.open(picture)
+                st.session_state.status = 'processing'
                 
-                # Analyze emotion
-                data = analyze_emotion(image)
+                with st.spinner("🧠 Analyzing..."):
+                    image = Image.open(picture)
+                    
+                    # Analyze emotion
+                    data = analyze_emotion(image)
+                
                 if data:
                     st.session_state.analysis_data = data
                     st.session_state.status = 'completed'
                     
-                    # Draw bounding box
+                    # Draw bounding box on image
                     img_with_box = draw_bounding_box(np.array(image), data['region'])
                     
-                    # Display with overlay
-                    st.image(img_with_box, use_container_width=True)
+                    col_img, col_info = st.columns([2, 1])
                     
-                    # Show emotion label
-                    if data['region']['w'] > 0:
-                        dominant = data['emotions'][0]
-                        meta = get_emotion_meta(dominant['label'])
-                        st.caption(f"{meta['emoji']} {meta['label']} · {dominant['score']:.0f}%")
+                    with col_img:
+                        st.image(img_with_box, use_container_width=True)
+                    
+                    with col_info:
+                        dominant = get_emotion_meta(data['emotions'][0]['label'])
+                        st.markdown(f"""
+                        ### {dominant['emoji']} {dominant['label']}
+                        **{data['emotions'][0]['score']:.1f}%** confidence
+                        """)
+                        
+                        st.caption("📊 Full analysis available in the right panel →")
+                else:
+                    st.image(image, use_container_width=True)
+                    st.warning("⚠ No face detected - please adjust position")
+                    st.session_state.status = 'idle'
                 
-                # Auto-refresh for continuous analysis
-                time.sleep(0.8)
-                st.rerun()
+                st.info("💡 Take another photo to update results")
+            else:
+                st.info("📸 No photo captured yet - click the camera button above")
         else:
             st.session_state.status = 'idle'
-            st.info("Click 'Start Scan' to begin real-time emotion detection")
+            st.info("👆 Click 'Start Scan' to begin real-time emotion detection")
 
 # Right panel - Analysis results
 with col2:
